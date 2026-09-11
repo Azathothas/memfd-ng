@@ -1,5 +1,9 @@
 # memfd-ng-ffi
 
+[![crates.io](https://img.shields.io/crates/v/memfd-ng-ffi.svg)](https://crates.io/crates/memfd-ng-ffi)
+[![docs.rs](https://docs.rs/memfd-ng-ffi/badge.svg)](https://docs.rs/memfd-ng-ffi)
+[![license: 0BSD](https://img.shields.io/crates/l/memfd-ng-ffi.svg)](https://github.com/Azathothas/memfd-ng/blob/main/LICENSE)
+
 `memfd-ng-ffi` provides a C interface for `memfd-ng`.
 
 The library executes ELF image bytes from memory on Linux and FreeBSD. See

@@ -1,5 +1,9 @@
 # memfd-ng
 
+[![crates.io](https://img.shields.io/crates/v/memfd-ng.svg)](https://crates.io/crates/memfd-ng)
+[![docs.rs](https://docs.rs/memfd-ng/badge.svg)](https://docs.rs/memfd-ng)
+[![license: 0BSD](https://img.shields.io/crates/l/memfd-ng.svg)](https://github.com/Azathothas/memfd-ng/blob/main/LICENSE)
+
 `memfd-ng` executes ELF image bytes from memory on Linux and FreeBSD. The API
 follows the main behavior of `std::process::Command`.
 
@@ -17,6 +21,26 @@ let output = MemFdExecutable::new("sh", &code)
 assert_eq!(output.stdout, b"in-memory\n");
 assert_eq!(output.status.code(), Some(7));
 ```
+
+## Install
+
+Add the crate with Cargo:
+
+```sh
+cargo add memfd-ng
+```
+
+Or add the dependency to `Cargo.toml`:
+
+```toml
+[dependencies]
+memfd-ng = "0.1.0"
+```
+
+| crate | crates.io | documentation |
+| --- | --- | --- |
+| `memfd-ng` | [crates.io/crates/memfd-ng](https://crates.io/crates/memfd-ng) | [docs.rs/memfd-ng](https://docs.rs/memfd-ng) |
+| `memfd-ng-ffi` | [crates.io/crates/memfd-ng-ffi](https://crates.io/crates/memfd-ng-ffi) | [docs.rs/memfd-ng-ffi](https://docs.rs/memfd-ng-ffi) |
 
 ## Execution sequence
 

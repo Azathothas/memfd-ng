@@ -1,10 +1,10 @@
 name: cross
 
 # Compile and link the full suite for every major Linux architecture. Then run
-# QEMU-safe protocol, named-path execution, doctest, and FFI coverage. Linux
-# cannot reliably execute a foreign anonymous CLOEXEC memfd through binfmt:
-# the emulator may lose the descriptor while it replaces the process. The
-# named-path test exercises the supported fallback for emulated programs.
+# QEMU-safe protocol and FFI ABI coverage. Linux cannot reliably run a nested
+# foreign child from a QEMU user-mode test process: replacing that process can
+# lose its anonymous CLOEXEC image descriptor and its emulated pipe state.
+# Child-process behaviour remains covered by the native Linux and FreeBSD jobs.
 #
 # The standard binfmt setup does not include big-endian PowerPC. This workflow
 # registers all handlers and checks the PowerPC handlers.
@@ -81,12 +81,6 @@ jobs:
 
       - name: Pipe protocol tests
         run: cargo test --features test-hooks --test fuzz_pipe
-
-      - name: Named-path execution under QEMU
-        run: cargo test --features test-hooks --test ladder named_rung_executes_and_parent_cleans_up_without_procfs -- --exact
-
-      - name: doctests
-        run: cargo test --doc
 
       - name: FFI ABI smoke test
         run: cargo test -p memfd-ng-ffi abi_version_and_version_string -- --exact
