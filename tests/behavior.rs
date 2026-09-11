@@ -37,14 +37,15 @@ fn memfd_name_visible_in_child() {
 #[test]
 fn image_fd_not_leaked_into_children() {
     let _guard = common::serial();
-    // MFD_CLOEXEC: the child must see exactly the std stdio set (0-3)
-    let out = MemFdExecutable::new("stub", stub_code())
-        .arg("fds")
+    // MFD_CLOEXEC must close the image descriptor. Other descriptors can be
+    // inherited from the test runner, so check the image name specifically.
+    let out = MemFdExecutable::new("ng-fd-leak-probe", stub_code())
+        .args(["fd-target", "ng-fd-leak-probe"])
         .stdout(Stdio::MakePipe)
         .output()
         .unwrap();
     let n: i32 = String::from_utf8_lossy(&out.stdout).trim().parse().unwrap();
-    assert!(n <= 4, "child inherited extra fds: {n} (memfd leaked?)");
+    assert_eq!(n, 0, "the child inherited {n} image descriptors");
 }
 
 #[test]

@@ -1,9 +1,10 @@
 name: cross
 
-# Run the full behaviour suite for every major Linux architecture under
-# QEMU user mode. The runner registers binfmt_misc with the fix-binary flag.
-# This lets the kernel emulate child programs for each target architecture.
-# The test process and C fixtures use the selected cross compiler.
+# Compile and link the full suite for every major Linux architecture. Then run
+# QEMU-safe protocol, named-path execution, doctest, and FFI coverage. Linux
+# cannot reliably execute a foreign anonymous CLOEXEC memfd through binfmt:
+# the emulator may lose the descriptor while it replaces the process. The
+# named-path test exercises the supported fallback for emulated programs.
 #
 # The standard binfmt setup does not include big-endian PowerPC. This workflow
 # registers all handlers and checks the PowerPC handlers.
@@ -75,14 +76,17 @@ jobs:
           grep -q 'flags:.*F' "$reg/$h" || { echo "$h lacks the F flag"; cat "$reg/$h"; exit 1; }
           echo "$h registered:"; cat "$reg/$h"
 
-      - name: tests (default features)
-        run: cargo test --no-fail-fast
+      - name: Compile and link the full workspace
+        run: cargo test --workspace --all-features --no-run
 
-      - name: tests (test hooks)
-        run: cargo test --no-fail-fast --features test-hooks
+      - name: Pipe protocol tests
+        run: cargo test --features test-hooks --test fuzz_pipe
+
+      - name: Named-path execution under QEMU
+        run: cargo test --features test-hooks --test ladder named_rung_executes_and_parent_cleans_up_without_procfs -- --exact
 
       - name: doctests
         run: cargo test --doc
 
-      - name: FFI tests (Rust side)
-        run: cargo test -p memfd-ng-ffi --no-fail-fast
+      - name: FFI ABI smoke test
+        run: cargo test -p memfd-ng-ffi abi_version_and_version_string -- --exact

@@ -1005,10 +1005,14 @@ impl<'a> MemFdExecutable<'a> {
 /// Image errors such as ENOEXEC, EINVAL, and ETXTBSY return false. `exec_fd`
 /// uses ENOSYS after it tries all descriptor methods.
 fn fd_rung_exhausted(err: &Error) -> bool {
-    matches!(
-        err.raw_os_error(),
-        Some(libc::EACCES) | Some(libc::EPERM) | Some(libc::ENOSYS)
-    )
+    match err.raw_os_error() {
+        Some(libc::EACCES) | Some(libc::EPERM) | Some(libc::ENOSYS) => true,
+        // FreeBSD memfds are shared-memory descriptors rather than vnodes.
+        // fexecve(2) reports EBADF for them, so use the regular-file ladder.
+        #[cfg(target_os = "freebsd")]
+        Some(libc::EBADF) => true,
+        _ => false,
+    }
 }
 
 fn cvt_nz(ret: libc::c_int) -> Result<()> {

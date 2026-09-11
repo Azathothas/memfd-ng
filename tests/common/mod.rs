@@ -139,7 +139,7 @@ const STUB_SRC: &str = r#"
    exit N  : exit with N
    env V   : print getenv(V) or "(unset)"
    pwd     : print cwd
-   fds     : count entries in /proc/self/fd (procfs systems)
+   fd-target S : count descriptors whose procfs target contains S
    cat     : copy stdin to stdout, exit 0
    sleep   : sleep 60 (for kill tests)
    pgroup  : print "pgid=<getpgid(0)> sid=<getsid(0)>"
@@ -164,10 +164,17 @@ int main(int argc, char **argv, char **envp) {
         puts(getcwd(buf, sizeof buf) ? buf : "(fail)");
         return 0;
     }
-    if (!strcmp(argv[1], "fds")) {
+    if (!strcmp(argv[1], "fd-target")) {
         int n = 0;
-        for (int fd = 0; fd < 1024; fd++) {
-            if (fcntl(fd, F_GETFD) != -1) n++;
+        const char *needle = argc > 2 ? argv[2] : "";
+        for (int fd = 3; fd < 1024; fd++) {
+            char path[64], target[4096];
+            snprintf(path, sizeof path, "/proc/self/fd/%d", fd);
+            ssize_t len = readlink(path, target, sizeof target - 1);
+            if (len > 0) {
+                target[len] = '\0';
+                if (strstr(target, needle)) n++;
+            }
         }
         printf("%d\n", n);
         return 0;
