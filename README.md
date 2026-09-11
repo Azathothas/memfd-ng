@@ -34,7 +34,7 @@ Or add the dependency to `Cargo.toml`:
 
 ```toml
 [dependencies]
-memfd-ng = "0.1.0"
+memfd-ng = "0.1.1"
 ```
 
 | crate | crates.io | documentation |
@@ -173,7 +173,7 @@ The minimum supported Rust version is 1.65.
 ## Publication order
 
 Publish `memfd-ng` before `memfd-ng-ffi`. The FFI package depends on version
-0.1.0 of `memfd-ng`, so Cargo can run its package or publish dry run only after
+0.1.1 of `memfd-ng`, so Cargo can run its package or publish dry run only after
 that version is available from crates.io.
 
 ## License

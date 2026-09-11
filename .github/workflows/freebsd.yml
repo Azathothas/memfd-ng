@@ -14,7 +14,7 @@ jobs:
   freebsd:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
       - name: Build and run the portable suite in a FreeBSD 14.2 VM
         uses: vmactions/freebsd-vm@v1
         with:

@@ -22,3 +22,8 @@ updates:
       github-actions:
         patterns:
           - "*"
+    ignore:
+      # dtolnay/rust-toolchain selects a toolchain by ref (@stable, @1.65),
+      # not by version tag. The msrv job pins @1.65 on purpose. Dependabot must
+      # not change it.
+      - dependency-name: "dtolnay/rust-toolchain"

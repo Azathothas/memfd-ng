@@ -1,6 +1,6 @@
 [package]
 name = "memfd-ng-ffi"
-version = "0.1.0"
+version = "0.1.1"
 edition = "2021"
 rust-version = "1.65"
 license = "0BSD"
@@ -15,5 +15,5 @@ name = "memfd_ng_ffi"
 crate-type = ["cdylib", "rlib"]
 
 [dependencies]
-memfd-ng = { version = "0.1.0", path = ".." }
+memfd-ng = { version = "0.1.1", path = ".." }
 libc = "0.2"
