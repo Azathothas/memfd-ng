@@ -1,18 +1,18 @@
-#![allow(dead_code)] // shared by multiple test binaries; each uses a subset
+#![allow(dead_code)] // Each test binary uses part of this module.
 
-//! Shared fixtures: real binaries built at test time (static + dynamic), a
-//! hand-assembled ELF64 that needs no toolchain, and a serial lock for tests
-//! that touch this process's environment.
+//! Provide shared test programs and environment controls.
 
 use std::env;
+use std::ffi::OsString;
 use std::path::PathBuf;
 use std::process::Command;
 use std::sync::{Mutex, MutexGuard, Once};
 
 static SERIAL: Mutex<()> = Mutex::new(());
 
-/// Lock that survives a poisoned mutex: a panic in one test must not cascade
-/// into every later test.
+/// Lock environment changes across tests.
+///
+/// Recover the guard if an earlier panic poisoned the mutex.
 pub fn serial() -> MutexGuard<'static, ()> {
     match SERIAL.lock() {
         Ok(g) => g,
@@ -20,17 +20,88 @@ pub fn serial() -> MutexGuard<'static, ()> {
     }
 }
 
+/// Hold the serial lock and record environment changes.
+///
+/// `Drop` restores each changed variable. This prevents one test from
+/// changing the environment of another test.
+pub struct EnvGuard {
+    saved: Vec<(OsString, Option<OsString>)>,
+    _serial: MutexGuard<'static, ()>,
+}
+
+impl EnvGuard {
+    /// Take the serial lock and apply `vars`. Each earlier value is saved.
+    pub fn set(vars: &[(&str, &str)]) -> Self {
+        let mut g = EnvGuard {
+            saved: Vec::new(),
+            _serial: serial(),
+        };
+        for (k, v) in vars {
+            g.apply(k, Some(v));
+        }
+        g
+    }
+
+    /// Take the serial lock without changing an environment variable.
+    pub fn empty() -> Self {
+        EnvGuard {
+            saved: Vec::new(),
+            _serial: serial(),
+        }
+    }
+
+    /// Set one variable and save its earlier value.
+    pub fn put(&mut self, key: &str, value: &str) -> &mut Self {
+        self.apply(key, Some(value));
+        self
+    }
+
+    /// Remove one variable and save its earlier value.
+    pub fn unset(&mut self, key: &str) -> &mut Self {
+        self.apply(key, None);
+        self
+    }
+
+    fn apply(&mut self, key: &str, value: Option<&str>) {
+        self.saved.push((OsString::from(key), env::var_os(key)));
+        match value {
+            Some(v) => env::set_var(key, v),
+            None => env::remove_var(key),
+        }
+    }
+}
+
+impl Drop for EnvGuard {
+    fn drop(&mut self) {
+        // Restore in reverse order to support a key that changed more than once.
+        for (key, prev) in self.saved.iter().rev() {
+            match prev {
+                Some(v) => env::set_var(key, v),
+                None => env::remove_var(key),
+            }
+        }
+    }
+}
+
+/// Create an empty test directory under `CARGO_TARGET_TMPDIR`.
+///
+/// The target file system permits execution. This avoids assumptions about
+/// the mount options for system directories.
+pub fn exec_tmpdir(tag: &str) -> PathBuf {
+    let dir = target_tmpdir().join(format!("ladder-{tag}-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).expect("create exec tmpdir");
+    dir
+}
+
 fn target_tmpdir() -> PathBuf {
     PathBuf::from(env!("CARGO_TARGET_TMPDIR"))
 }
 
-/// Compile `code` with the system cc. `static` produces a real static binary
-/// so tests exercise large images and non-trivial ELF layouts, not toy
-/// stubs. Returns the binary path.
+/// Compile `code` with the selected C compiler and return the binary path.
 fn cc_build(name: &str, code: &str, link_static: bool) -> PathBuf {
-    // Per-process fixture names: test binaries build fixtures in parallel and
-    // a shared path would let one binary exec the other's half-written ELF
-    // (observed live as ENOEXEC under qemu-user; flaky on the host too).
+    // Use a path for this process. Test binaries can compile fixtures at the
+    // same time. Separate paths prevent execution of a partial file.
     let pid = std::process::id();
     let dir = target_tmpdir();
     std::fs::create_dir_all(&dir).expect("create fixture tmpdir");
@@ -117,12 +188,14 @@ int main(int argc, char **argv, char **envp) {
 }
 "#;
 
-
 pub fn static_stub() -> &'static PathBuf {
     static INIT: Once = Once::new();
     static mut SLOT: Option<PathBuf> = None;
     unsafe {
-        INIT.call_once(|| (*core::ptr::addr_of_mut!(SLOT)) = Some(cc_build("memfd_ng_stub_static", STUB_SRC, true)));
+        INIT.call_once(|| {
+            (*core::ptr::addr_of_mut!(SLOT)) =
+                Some(cc_build("memfd_ng_stub_static", STUB_SRC, true))
+        });
         (*core::ptr::addr_of!(SLOT)).as_ref().unwrap()
     }
 }
@@ -131,7 +204,10 @@ pub fn dynamic_stub() -> &'static PathBuf {
     static INIT: Once = Once::new();
     static mut SLOT: Option<PathBuf> = None;
     unsafe {
-        INIT.call_once(|| (*core::ptr::addr_of_mut!(SLOT)) = Some(cc_build("memfd_ng_stub_dynamic", STUB_SRC, false)));
+        INIT.call_once(|| {
+            (*core::ptr::addr_of_mut!(SLOT)) =
+                Some(cc_build("memfd_ng_stub_dynamic", STUB_SRC, false))
+        });
         (*core::ptr::addr_of!(SLOT)).as_ref().unwrap()
     }
 }
@@ -140,7 +216,10 @@ pub fn stub_code() -> &'static Vec<u8> {
     static INIT: Once = Once::new();
     static mut SLOT: Option<Vec<u8>> = None;
     unsafe {
-        INIT.call_once(|| (*core::ptr::addr_of_mut!(SLOT)) = Some(std::fs::read(static_stub()).expect("read static stub")));
+        INIT.call_once(|| {
+            (*core::ptr::addr_of_mut!(SLOT)) =
+                Some(std::fs::read(static_stub()).expect("read static stub"))
+        });
         (*core::ptr::addr_of!(SLOT)).as_ref().unwrap()
     }
 }
@@ -149,7 +228,10 @@ pub fn dynamic_code() -> &'static Vec<u8> {
     static INIT: Once = Once::new();
     static mut SLOT: Option<Vec<u8>> = None;
     unsafe {
-        INIT.call_once(|| (*core::ptr::addr_of_mut!(SLOT)) = Some(std::fs::read(dynamic_stub()).expect("read dynamic stub")));
+        INIT.call_once(|| {
+            (*core::ptr::addr_of_mut!(SLOT)) =
+                Some(std::fs::read(dynamic_stub()).expect("read dynamic stub"))
+        });
         (*core::ptr::addr_of!(SLOT)).as_ref().unwrap()
     }
 }
@@ -159,9 +241,8 @@ pub fn dynamic_code() -> &'static Vec<u8> {
 #[cfg(target_arch = "x86_64")]
 pub const TINY_ELF_EXIT42: &[u8] = &[
     // ehdr
-    0x7f, b'E', b'L', b'F', 2, 1, 1, 0, 0, 0, 0, 0, 0, 0, 0, 0,
-    0x02, 0x00, 0x3e, 0x00, 0x01, 0x00, 0x00, 0x00,
-    0x78, 0x00, 0x40, 0x00, 0x00, 0x00, 0x00, 0x00, // e_entry 0x400078
+    0x7f, b'E', b'L', b'F', 2, 1, 1, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0x02, 0x00, 0x3e, 0x00, 0x01, 0x00,
+    0x00, 0x00, 0x78, 0x00, 0x40, 0x00, 0x00, 0x00, 0x00, 0x00, // e_entry 0x400078
     0x40, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, // e_phoff 64
     0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, // e_shoff 0
     0x00, 0x00, 0x00, 0x00, // e_flags
@@ -170,25 +251,18 @@ pub const TINY_ELF_EXIT42: &[u8] = &[
     0x01, 0x00, // e_phnum 1
     0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
     // phdr @64: PT_LOAD R+X, vaddr 0x400000, filesz/memsz 0x90
-    0x01, 0x00, 0x00, 0x00,
-    0x05, 0x00, 0x00, 0x00,
-    0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
-    0x00, 0x00, 0x40, 0x00, 0x00, 0x00, 0x00, 0x00,
-    0x00, 0x00, 0x40, 0x00, 0x00, 0x00, 0x00, 0x00,
-    0x88, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
-    0x88, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+    0x01, 0x00, 0x00, 0x00, 0x05, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+    0x00, 0x00, 0x40, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x40, 0x00, 0x00, 0x00, 0x00, 0x00,
+    0x88, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x88, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
     0x00, 0x10, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
     // code @0x78: mov eax,60; mov edi,42; syscall
-    0xb8, 0x3c, 0x00, 0x00, 0x00,
-    0xbf, 0x2a, 0x00, 0x00, 0x00,
-    0x0f, 0x05,
+    0xb8, 0x3c, 0x00, 0x00, 0x00, 0xbf, 0x2a, 0x00, 0x00, 0x00, 0x0f, 0x05,
 ];
 
-/// The tmpfs ladder's file prefix, for leftover checks.
+/// File prefix used by the temporary-file sequence.
 pub const FALLBACK_PREFIX: &str = ".memfd-ng-";
 
-/// True when the running kernel is at least `major.minor`; used to skip
-/// pidfd-era assertions on ancient kernels instead of failing them.
+/// Return true when the running Linux kernel is at least `major.minor`.
 pub fn kernel_at_least(major: u64, minor: u64) -> bool {
     let info = std::fs::read_to_string("/proc/sys/kernel/osrelease").unwrap_or_default();
     let mut parts = info.split('.');
@@ -200,17 +274,23 @@ pub fn kernel_at_least(major: u64, minor: u64) -> bool {
     (k_major, k_minor) >= (major, minor)
 }
 
-/// Remove leftovers from earlier runs so cleanliness assertions stay
-/// hermetic no matter what state the machine is in.
+/// Remove temporary files from earlier test runs.
 pub fn clear_stale_fallback_files(dir: &PathBuf) {
-    for entry in std::fs::read_dir(dir).expect("read dir").filter_map(|e| e.ok()) {
-        if entry.file_name().to_string_lossy().starts_with(FALLBACK_PREFIX) {
+    for entry in std::fs::read_dir(dir)
+        .expect("read dir")
+        .filter_map(|e| e.ok())
+    {
+        if entry
+            .file_name()
+            .to_string_lossy()
+            .starts_with(FALLBACK_PREFIX)
+        {
             let _ = std::fs::remove_file(entry.path());
         }
     }
 }
 
-/// Fail when the tmpfs ladder left files behind in the given directory.
+/// Fail when temporary files remain in the given directory.
 pub fn assert_no_fallback_leftovers(dir: &PathBuf) {
     let leftovers: Vec<_> = std::fs::read_dir(dir)
         .expect("read dir")
@@ -219,7 +299,7 @@ pub fn assert_no_fallback_leftovers(dir: &PathBuf) {
         .collect();
     assert!(
         leftovers.is_empty(),
-        "tmpfs ladder left files behind: {leftovers:?}"
+        "temporary files remain: {leftovers:?}"
     );
 }
 

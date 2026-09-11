@@ -128,7 +128,12 @@ fn parity_stdin_pipes() {
         .stdout(std::process::Stdio::piped())
         .spawn()
         .unwrap();
-    std_child.stdin.take().unwrap().write_all(b"echo through std\n").unwrap();
+    std_child
+        .stdin
+        .take()
+        .unwrap()
+        .write_all(b"echo through std\n")
+        .unwrap();
     let std_out = std_child.wait_with_output().unwrap();
 
     let mut ng_child = MemFdExecutable::new("stub", stub_code())
@@ -137,7 +142,12 @@ fn parity_stdin_pipes() {
         .stdout(Stdio::MakePipe)
         .spawn()
         .unwrap();
-    ng_child.stdin.take().unwrap().write_all(b"echo through ng\n").unwrap();
+    ng_child
+        .stdin
+        .take()
+        .unwrap()
+        .write_all(b"echo through ng\n")
+        .unwrap();
     let ng_out = ng_child.wait_with_output().unwrap();
 
     assert_eq!(std_out.stdout, b"echo through std\n");
@@ -159,7 +169,7 @@ fn parity_kill_signal() {
     let st = ng.wait().unwrap();
     assert_eq!(st.signal(), Some(9));
     assert!(!st.success());
-    // killing again must fail cleanly, like std
+    // A second kill call must return an error, as the standard library does.
     assert!(ng.kill().is_err());
 }
 
@@ -181,26 +191,23 @@ fn parity_dynamic_binary() {
 
 #[test]
 fn parity_bad_executable_is_enoexec() {
-    // std::process::Command on a non-executable file errors; a corrupt
-    // image must surface the kernel's own verdict, not a panic exit code.
-    let std_err = StdCommand::new("/tmp")
-        .output()
-        .unwrap_err();
+    // std::process::Command on a directory errors (the errno differs between
+    // kernels, so match only that it errors, like std); a corrupt image must
+    // Return the operating system error instead of a panic exit code.
+    let std_err = StdCommand::new("/tmp").output().unwrap_err();
+    assert!(
+        std_err.raw_os_error().is_some(),
+        "std must error on a directory"
+    );
     let ng_err = MemFdExecutable::new("dir-as-image", b"not an elf")
         .output()
         .unwrap_err();
-    assert_eq!(std_err.raw_os_error(), Some(libc_like_eacces_or_enuexec_dir()));
     let _ = ng_err;
     let ng = MemFdExecutable::new("bogus", b"\x7fELFgarbage").status();
     match ng {
         Err(e) => assert_eq!(e.raw_os_error(), Some(8)), // ENOEXEC
         Ok(st) => panic!("corrupt image execed: raw={}", st.into_raw()),
     }
-}
-
-fn libc_like_eacces_or_enuexec_dir() -> i32 {
-    // /tmp is a directory: kernel answers EACCES (or ENOEXEC elsewhere)
-    13
 }
 
 #[test]

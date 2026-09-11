@@ -42,7 +42,11 @@ fn time_n<F: FnMut()>(label: &str, n: u32, mut f: F) -> std::time::Duration {
         f();
     }
     let d = start.elapsed();
-    println!("{label:>28}: {:>10.1?}  ({:.3} us/spawn)", d, d.as_micros() as f64 / n as f64);
+    println!(
+        "{label:>28}: {:>10.1?}  ({:.3} us/spawn)",
+        d,
+        d.as_micros() as f64 / n as f64
+    );
     d
 }
 
@@ -60,7 +64,7 @@ fn main() {
     time_n("std::process::Command", n, || {
         Command::new(&bin).status().unwrap();
     });
-    time_n("memfd-ng cold", n, || {
+    let cold = time_n("memfd-ng cold", n, || {
         MemFdExecutable::new("bench", &code).status().unwrap();
     });
     time_n("memfd-ng prepared", n, || {
@@ -74,10 +78,19 @@ fn main() {
     // marginal cost of prepared spawns without the prepare:
     let mut exe = MemFdExecutable::new("bench", &code);
     exe.prepare().unwrap();
-    time_n("memfd-ng re-spawn", n, || {
+    let respawn = time_n("memfd-ng re-spawn", n, || {
         exe.status().unwrap();
     });
 
+    // Performance-regression guard: the prepared re-spawn path skips the
+    // The prepared case does not write and seal the image for each spawn. It
+    // must complete faster than the case that creates a new image each time.
+    assert!(
+        respawn < cold,
+        "prepared re-spawn ({respawn:?}) must beat cold ({cold:?}); prepared reuse regressed"
+    );
+
     let _ = std::fs::remove_dir_all(&tmp);
     let _ = std::io::stdout().flush();
+    println!("perf guard ok: re-spawn {respawn:?} < cold {cold:?}");
 }

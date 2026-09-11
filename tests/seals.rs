@@ -6,18 +6,25 @@ mod common;
 
 use common::stub_code;
 use memfd_ng::{MemFdExecutable, SealFlags};
+#[cfg(target_os = "linux")]
 use std::io::Write;
+#[cfg(target_os = "linux")]
 use std::os::unix::io::AsRawFd;
 
-const SEAL_SHRINK: i32 = 0x1;
-const SEAL_GROW: i32 = 0x2;
+// Kernel F_SEAL_* values (linux/fcntl.h). F_SEAL_SEAL is 0x1.
+const SEAL_SHRINK: i32 = 0x2;
+const SEAL_GROW: i32 = 0x4;
 const SEAL_WRITE: i32 = 0x8;
+#[cfg(target_os = "linux")]
 const SEAL_FUTURE_WRITE: i32 = 0x10;
 
+#[cfg(target_os = "linux")]
 fn kernel_seals(exe: &MemFdExecutable) -> i32 {
     let path = exe.memfd_path().expect("procfs available in tests");
     let probe = std::fs::File::open(&path).unwrap();
-    let bits = unsafe { libc::fcntl(probe.as_raw_fd(), 1034 /* F_GET_SEALS */) };
+    let bits = unsafe {
+        libc::fcntl(probe.as_raw_fd(), 1034 /* F_GET_SEALS */)
+    };
     assert!(bits >= 0, "F_GET_SEALS failed — was MFD_ALLOW_SEALING set?");
     bits
 }
@@ -29,13 +36,35 @@ fn default_seals_are_shrink_grow_write() {
     exe.prepare().unwrap();
     assert!(exe.is_sealed());
     assert_eq!(
-        kernel_seals(&exe),
+        exe.current_seals().unwrap().bits(),
         SEAL_SHRINK | SEAL_GROW | SEAL_WRITE,
         "the default must stay SHRINK|GROW|WRITE"
     );
 }
 
 #[test]
+fn current_seals_reads_back_the_kernel_bits() {
+    let _guard = common::serial();
+    let mut exe = MemFdExecutable::new("seals-readback", stub_code());
+    exe.prepare().unwrap();
+    let reported = exe.current_seals().expect("a prepared image reports seals");
+    // current_seals() must return the default set.
+    #[cfg(target_os = "linux")]
+    assert_eq!(reported.bits(), kernel_seals(&exe));
+    assert_eq!(reported, SealFlags::full());
+    // regression lock: GROW must actually be one of the sealed bits
+    assert!(
+        reported.contains(SealFlags::GROW),
+        "the default must seal GROW (bits {:#x})",
+        reported.bits()
+    );
+    // no image prepared yet -> None
+    let fresh = MemFdExecutable::new("seals-fresh", stub_code());
+    assert!(fresh.current_seals().is_none());
+}
+
+#[test]
+#[cfg(target_os = "linux")]
 fn future_write_seal_lands_exactly() {
     let _guard = common::serial();
     let mut exe = MemFdExecutable::new("seals-fw", stub_code());
@@ -49,6 +78,7 @@ fn future_write_seal_lands_exactly() {
 }
 
 #[test]
+#[cfg(target_os = "linux")]
 fn arbitrary_seal_combinations_land_exactly() {
     let _guard = common::serial();
     for flags in [
@@ -77,12 +107,13 @@ fn empty_seal_set_prepares_unsealed_but_sealable() {
     assert!(!exe.is_sealed(), "zero bits must not report as sealed");
     // the memfd stays sealable (MFD_ALLOW_SEALING was set): reading the
     // (empty) seal set must work
-    assert_eq!(kernel_seals(&exe), 0);
+    assert_eq!(exe.current_seals().unwrap().bits(), 0);
     let st = exe.arg("exit").arg("5").status().unwrap();
     assert_eq!(st.code(), Some(5));
 }
 
 #[test]
+#[cfg(target_os = "linux")]
 fn write_seal_blocks_new_writes() {
     let _guard = common::serial();
     // F_SEAL_WRITE / F_SEAL_FUTURE_WRITE: nothing may modify the image
@@ -99,6 +130,7 @@ fn write_seal_blocks_new_writes() {
 }
 
 #[test]
+#[cfg(target_os = "linux")]
 fn changing_seals_invalidates_the_prepared_image() {
     let _guard = common::serial();
     let mut exe = MemFdExecutable::new("seals-reseat", stub_code());
@@ -116,9 +148,8 @@ fn changing_seals_invalidates_the_prepared_image() {
     exe.prepare().unwrap();
     assert!(!exe.is_sealed());
     // Our seal set must not be applied. (The kernel reports F_GET_SEALS = 1
-    // — F_SEAL_SHRINK — for memfds created WITHOUT MFD_ALLOW_SEALING on
-    // 6.18, rather than the documented error; we assert only on the bits
-    // we asked for.)
+    // — F_SEAL_SEAL — for a memfd created WITHOUT MFD_ALLOW_SEALING, rather
+    // than the documented error; assert only on the bits we asked for.)
     let bits = kernel_seals(&exe);
     assert_eq!(
         bits & (SEAL_GROW | SEAL_WRITE | SEAL_FUTURE_WRITE),
@@ -128,13 +159,11 @@ fn changing_seals_invalidates_the_prepared_image() {
 }
 
 #[test]
+#[cfg(target_os = "linux")]
 fn sealed_payload_survives_child_write_attempts() {
     let _guard = common::serial();
-    // A prepared+sealed image must be immutable even from children of the
-    // sealed image itself: the stub opens /proc/self/exe for writing.
-    // (Needs the image to try: use the stub's cat mode on its own exe is
-    // read-only, so instead assert the parent-side contract: no writable fd
-    // of ours can change the image.)
+    // A prepared and sealed image must not change. Open the procfs path for
+    // writing and verify that the kernel rejects the write.
     let mut exe = MemFdExecutable::new("seals-immutable", stub_code());
     exe.seals(SealFlags::WRITE | SealFlags::GROW | SealFlags::SHRINK);
     exe.prepare().unwrap();
@@ -142,7 +171,10 @@ fn sealed_payload_survives_child_write_attempts() {
     let before = std::fs::read(&path).unwrap();
     let res = std::fs::OpenOptions::new().write(true).open(&path);
     if let Ok(mut w) = res {
-        assert!(w.write_all(b"\x7fCORRUPT").is_err(), "write must fail on a WRITE-sealed memfd");
+        assert!(
+            w.write_all(b"\x7fCORRUPT").is_err(),
+            "write must fail on a WRITE-sealed memfd"
+        );
     }
     let after = std::fs::read(&path).unwrap();
     assert_eq!(before, after, "image changed under seal");

@@ -1,167 +1,157 @@
 # memfd-ng
 
-Execute ELF binaries straight from memory. Put the bytes of a Linux
-executable in a `&[u8]` — `include_bytes!()`, a socket, a compiler — and
-`MemFdExecutable` runs them straight from an anonymous in-memory file,
-through an interface shaped like `std::process::Command`.
+`memfd-ng` executes ELF image bytes from memory on Linux and FreeBSD. The API
+follows the main behavior of `std::process::Command`.
 
 ```rust
 use memfd_ng::{MemFdExecutable, Stdio};
 
 let code = std::fs::read("/bin/sh").unwrap();
-let out = MemFdExecutable::new("sh", &code)
+let output = MemFdExecutable::new("sh", &code)
     .arg("-c")
     .arg("echo in-memory; exit 7")
     .stdout(Stdio::piped())
     .output()
     .unwrap();
 
-assert_eq!(out.stdout, b"in-memory\n");
-assert_eq!(out.status.code(), Some(7));
+assert_eq!(output.stdout, b"in-memory\n");
+assert_eq!(output.status.code(), Some(7));
 ```
 
-## How a spawn executes
+## Execution sequence
 
-```
-image bytes
-     │
-     ▼
-memfd_create(MFD_CLOEXEC │ MFD_EXEC? │ MFD_ALLOW_SEALING?)   ← probed once per process
-     │ write + seal (configurable seals, default SHRINK|GROW|WRITE)
-     ▼
-spawn: clone3(CLONE_VFORK │ CLONE_PIDFD) → pidfd      (kernel 5.3+; plain fork() fallback)
-     ▼
-rung 1: execveat(fd, "", AT_EMPTY_PATH)      Linux 3.19+, no procfs needed
-rung 2: execve("/proc/self/fd/N")            3.17/3.18, procfs only
-rung 3: tmpfs ladder → named exec            emulators, ancient kernels
-```
+The library performs these operations:
 
-Every rung after a refused `execveat` runs without writing anything to
-stderr (captured output is never polluted) and stays allocation-free in the
-forked child (stack buffers and raw syscalls only — argv/envp are built
-before the fork, so the child never depends on a malloc lock another thread
-may hold).
+1. It creates an anonymous file with `memfd_create`.
+2. It writes the image to the file.
+3. It applies the configured file seals.
+4. It creates a child process.
+5. It executes the file descriptor.
 
-The tmpfs ladder stages each candidate on an executable filesystem —
-`XDG_RUNTIME_DIR`, `TMPDIR`/`/tmp`, `/dev/shm`, `~/.cache` — rejecting
-`ST_NOEXEC` mounts outright via a raw `statfs`. The write phase prefers
-`O_TMPFILE`: an anonymous inode with no name to leak if anything crashes
-mid-write. A name is linked only so a rung can exec it (and for emulators,
-which can only exec a path), and the parent unlinks it the moment the exec
-outcome reaches it. Staged files are made read-only before exec (the
-kernel's `ETXTBSY` rule exempts memfds but not regular files). No threads,
-no helper processes, no sleeps, no races.
+Linux uses `execveat` with `AT_EMPTY_PATH` first. Linux can then use
+`/proc/self/fd/N` when procfs is available. FreeBSD uses `fexecve`.
 
-## Properties
+The library uses a temporary executable file if descriptor execution is not
+available. It checks these directories in order:
 
-- **std Command discipline.** Arguments or environment values containing NUL
-  bytes are rejected with `InvalidInput`, exactly as std does; `Debug` never
-  dumps the image. An unmodified command inherits the parent environment
-  wholesale, exactly like std.
-- **Errno fidelity.** A failed exec surfaces from `spawn()`/`status()`/
-  `output()` as a real `std::io::Error` with the kernel's own errno
-  (`ENOEXEC`, `EACCES`, …). The child reports through the CLOEXEC pipe; it
-  never panics and never prints.
-- **Quiet by construction.** The library writes nothing to stderr — captured
-  output is never polluted.
-- **No fd leaks.** The image memfd carries `MFD_CLOEXEC`; children see
-  exactly the std stdio set; pidfds are closed with the `Child`.
-- **Sealed images.** Written images are sealed against shrink, grow and
-  write by default (`SealFlags::full()`), so nothing can swap code between
-  write and exec. `seals()` picks exact bits (including
-  `F_SEAL_FUTURE_WRITE`); `sealed(false)` opts out entirely. Note: kernels
-  refuse to seal hugetlb memfds — a hugetlb image runs unsealed.
-- **pidfd spawn, poll-able children.** Spawns use
-  `clone3(CLONE_VFORK | CLONE_PIDFD)` on kernel 5.3+ (plain `fork()`
-  otherwise). The parent is suspended until the child execs — the child runs
-  immediately instead of racing the scheduler — while its copy-on-write
-  memory keeps the child's pre-exec activity from ever touching the parent.
-  `Child::pidfd()` hands out a pidfd that stays valid across PID reuse and
-  fires `POLLIN` on exit: event loops can await a child without SIGCHLD.
-  `kill`/`wait`/`try_wait` go through `pidfd_send_signal`/`waitid(P_PIDFD)`
-  and are PID-reuse-immune, with the classic `kill`/`waitpid` as fallback.
-- **`vm.memfd_noexec`-aware.** `MFD_EXEC` (kernel 6.3+) is probed once and
-  used when supported, so kernels configured to restrict memfd execution
-  keep enforcing that; older kernels fall back gracefully.
-- **Repeat-spawn fast path.** `prepare()` writes and seals once; every later
-  spawn re-executes the sealed image without rewriting it.
-- **Process-group knobs.** `setsid()` and `process_group(pgid)` run in the
-  forked child before exec, std-`process_group(0)`-compatible; failures
-  surface as real errnos.
+1. `XDG_RUNTIME_DIR`
+2. `TMPDIR`, or `/tmp` when `TMPDIR` is not set
+3. `/dev/shm`
+4. `/var/tmp`
+5. `$HOME/.cache`
 
-## Optional: hugetlb, CLI, C FFI
+Linux checks the mount flags before it uses a directory. Linux first tries
+`O_TMPFILE` on supported file systems. FreeBSD uses the named-file method.
+The parent process removes each named file after the execution result is
+known.
 
-- **`MFD_HUGETLB`** (`.hugetlb(true)`): stage the image on hugetlbfs for
-  very large images (page-aligned via zero padding; loaders ignore bytes
-  past the last `PT_LOAD`). Every hugetlb refusal degrades to an ordinary
-  memfd — a spawn never fails *because of* the flag. `is_hugetlb()` reports
-  what actually happened.
-- **`memfd-run` CLI** (feature `cli`): `cargo build --features cli` gives you
-  `memfd-run [--name NAME] [--argv0 ARGV0] FILE [ARGS...]` — exec a file from
-  memory from the shell, exit code and 128+signal propagation included.
-- **C FFI** (crate `memfd-ng-ffi` in this workspace): a small `extern "C"`
-  layer (`memfd_ng_spawn/wait/kill/free`, negated-errno errors, panics caught
-  into `-EIO`) with a hand-written C header and a real C smoke driver
-  (`scripts/ffi-smoke.sh`).
+The child does not allocate memory between `fork` and `exec`. The parent
+creates the argument and environment arrays before `fork`. The library does
+not write diagnostic text to standard error.
 
-## Measured (this machine: x86_64, Linux 6.18, rustc 1.98)
+## Main behavior
 
-`cargo bench` — 300 spawns of a static `exit(0)` fixture, harness in
-`benches/spawn.rs`:
+- The library returns the operating system error from a failed `exec` call.
+- The library rejects NUL bytes in arguments and environment values.
+- Each image descriptor uses `MFD_CLOEXEC`.
+- File sealing is enabled by default.
+- `prepare()` writes and seals an image once for repeated execution.
+- `current_seals()` returns the seals reported by the operating system.
+- `setsid()` and `process_group()` configure the child before execution.
+- `Child::pidfd()` returns a Linux pidfd when the kernel provides one.
+- `kill`, `wait`, and `try_wait` use the pidfd on supported Linux kernels.
+- The library uses `fork`, `kill`, and `waitpid` when pidfds are not available.
 
-| workload | µs/spawn |
-| --- | --- |
-| `std::process::Command` (control) | ~188 |
-| memfd-ng, image written per spawn | ~552 |
-| memfd-ng, `prepare()` once, re-spawn | ~275 |
+The default seal set is `F_SEAL_SHRINK | F_SEAL_GROW | F_SEAL_WRITE`. Use
+`seals()` to select a different set. Use `sealed(false)` to disable sealing.
 
-Run-to-run variance is a few percent; the deltas are stable across runs.
+## Optional components
 
-Writing the image costs memory bandwidth; the prepared path halves the
-per-spawn cost. `cargo build --release` size of a minimal driver linking the
-crate: ~409 KB stripped (profile: `opt-level = "z"`, LTO, one codegen unit).
+### Huge pages
 
-## Environment
+Call `hugetlb(true)` to request a Linux hugetlb memfd. The library uses an
+ordinary memfd if the request fails. Call `is_hugetlb()` after `prepare()` to
+read the result. Linux 4.16 and later support file seals on hugetlb memfds.
+Older kernels use an ordinary memfd when sealing is enabled.
 
-- Linux (glibc, musl/static), x86_64 and aarch64 build- and link-verified;
-  the static musl build runs its full test suite; musl compile-checked for
-  both features.
-- **qemu-user CI** (`qemu-user.yml`): the whole suite runs under
-  `qemu-aarch64` with binfmt_misc registered, proving guest execution and the
-  ladder's behavior under emulation. (Without binfmt, a kernel answers
-  `ENOEXEC` for every guest-arch exec — verified locally; nothing user-space
-  can lift that, which is why the runner must register binfmt.)
-- **FreeBSD CI** (`freebsd.yml`): the full suite runs in a FreeBSD 14.2 VM,
-  retiring the "compile-reviewed only" caveat on the `fexecve` rung.
+### Command-line program
 
-Set `NO_MEMFDEXEC=1` to skip the memfd path and use the tmpfs ladder
-directly.
-
-## Testing
+Enable the `cli` feature to build `memfd-run`.
 
 ```sh
-cargo test                          # behavior, parity, doctests
-cargo test --features test-hooks    # + forced exec-ladder rungs & staging A/B
-cargo test --features cli           # + memfd-run CLI end-to-end
-cargo test -p memfd-ng-ffi          # + C FFI (Rust side)
-./scripts/ffi-smoke.sh              # + C FFI (real C driver)
-scripts/test.sh                     # everything, in CI order
+cargo build --release --features cli
+memfd-run [--name NAME] [--argv0 ARGV0] FILE [ARGS...]
 ```
 
-The parity suite runs identical workloads through `std::process::Command`
-and `MemFdExecutable` and asserts identical results — std is the oracle.
-Fixtures are real binaries: a static and a dynamic stub built with the
-system `cc` at test time (override with `MEMFD_NG_TEST_CC` for
-cross-environments), plus a hand-assembled 136-byte ELF64 that exits 42.
-`tests/fuzz_pipe.rs` structure-fuzzes the CLOEXEC-pipe protocol (2 000+
-deterministic junk/bitflip/truncation cases per run, boundary-length
-images, exact round-trips).
+The command returns the child exit code. It returns `128 + signal` when a
+signal terminates the child. It returns 126 when it cannot start the child.
 
-## MSRV
+### C interface
 
-Rust 1.64. The only dependency is `libc` (plus `memfd-ng` itself for the FFI
-crate).
+The `memfd-ng-ffi` workspace crate provides a C interface. The interface
+includes spawn, process ID, kill, wait, and free operations. See
+[`ffi/include/memfd-ng.h`](ffi/include/memfd-ng.h).
+
+## Measured results
+
+These measurements used x86_64 WSL2, Linux 7.2, and Rust 1.98. Each timing
+uses 300 executions of a static program that exits with code 0.
+
+| measurement | memfd-ng | VHSgunzo/memfd-exec 0.2.6 |
+| --- | ---: | ---: |
+| stripped minimal program | 329 KiB | 366 KiB |
+| new image for each execution | about 446 microseconds | about 578 microseconds |
+| prepared image | about 289 microseconds | not available |
+
+Results depend on the machine and operating system. Run `cargo bench` to
+measure the current system.
+
+## Platform checks
+
+The local test suite covers x86_64 Linux with glibc. The static musl job runs
+the same feature tests in CI. The cross-target checks cover FreeBSD,
+aarch64, ARMv7, i686, PowerPC, PowerPC64, PowerPC64LE, s390x, and RISC-V 64.
+
+The `freebsd` workflow builds and runs the portable tests in a FreeBSD 14.2
+virtual machine. The `cross` workflow runs the Linux tests for seven CPU
+architectures with QEMU user-mode emulation.
+
+Linux-only tests cover pidfds, hugetlb, Linux mount flags, and Linux fallback
+methods. Portable tests cover process behavior, the command-line program, and
+the C interface on FreeBSD.
+
+Set `NO_MEMFDEXEC=1` to skip memfd execution and use the temporary-file
+sequence.
+
+## Test commands
+
+```sh
+cargo fmt --all --check
+cargo clippy --workspace --all-targets --all-features -- -D warnings
+cargo test --no-fail-fast
+cargo test --no-fail-fast --features test-hooks
+cargo test --no-fail-fast --features cli
+cargo test -p memfd-ng-ffi --no-fail-fast
+./scripts/ffi-smoke.sh
+cargo publish --dry-run -p memfd-ng
+```
+
+The integration tests compile static and dynamic C fixtures. Set
+`MEMFD_NG_TEST_CC` to select the C compiler for a cross-target environment.
+
+The `test-hooks` feature is for integration tests. Do not enable it in normal
+applications.
+
+## Minimum Rust version
+
+The minimum supported Rust version is 1.65.
+
+## Publication order
+
+Publish `memfd-ng` before `memfd-ng-ffi`. The FFI package depends on version
+0.1.0 of `memfd-ng`, so Cargo can run its package or publish dry run only after
+that version is available from crates.io.
 
 ## License
 
-0BSD — see [LICENSE](LICENSE).
+This project uses the 0BSD license. See [LICENSE](LICENSE).

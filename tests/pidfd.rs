@@ -3,6 +3,8 @@
 //! (fork() cannot produce one), that it polls, that kill/wait/try_wait go
 //! through it, and that the vfork suspension does not corrupt the parent.
 
+#![cfg(target_os = "linux")]
+
 mod common;
 
 use std::thread::sleep;
@@ -79,7 +81,10 @@ fn pidfd_polls_before_and_after_exit() {
             assert_ne!(fds[0].revents & libc::POLLIN, 0);
             break;
         }
-        assert!(std::time::Instant::now() < deadline, "pidfd never polled readable");
+        assert!(
+            std::time::Instant::now() < deadline,
+            "pidfd never polled readable"
+        );
     }
     let st = child.wait().unwrap();
     assert_eq!(st.signal(), Some(9));
@@ -167,9 +172,11 @@ fn vfork_suspension_does_not_corrupt_the_parent() {
     }
     // The child runs (without CLONE_VM) while the parent is suspended; its
     // writes land in a private COW copy. Give it a big argv so the child's
-    // own pre-exec activity has plenty of surface, and verify the parent's
+    // own pre-exec activity uses a large stack. Verify that the parent's
     // own memory and the child's behavior afterwards.
-    let args: Vec<String> = (0..200).map(|i| format!("image-{i}-{}", "x".repeat(50))).collect();
+    let args: Vec<String> = (0..200)
+        .map(|i| format!("image-{i}-{}", "x".repeat(50)))
+        .collect();
     let expected = args.join(" ");
     let mut exe = MemFdExecutable::new("vfork-integrity", stub_code());
     exe.arg("print").args(&args);
@@ -199,24 +206,22 @@ fn vfork_suspension_does_not_corrupt_the_parent() {
 
 #[test]
 fn pidfd_path_coexists_with_the_tmpfs_ladder() {
-    let _guard = common::serial();
     if !kernel_at_least(5, 3) {
         println!("kernel too old; skipping");
         return;
     }
-    common::clear_stale_fallback_files(&common::tmpdir());
-    // NO_MEMFDEXEC=1: memfd skipped, tmpfs ladder runs, pidfd still handed out
-    std::env::set_var("NO_MEMFDEXEC", "1");
+    let good = common::exec_tmpdir("pidfd-ladder");
+    // Disable memfd execution. The child process must still provide a pidfd.
+    let _g = common::EnvGuard::set(&[("NO_MEMFDEXEC", "1"), ("TMPDIR", good.to_str().unwrap())]);
     let out = MemFdExecutable::new("pidfd-ladder", stub_code())
         .args(["print", "pidfd-plus-ladder"])
         .stdout(Stdio::MakePipe)
         .stderr(Stdio::MakePipe)
         .output()
         .unwrap();
-    std::env::remove_var("NO_MEMFDEXEC");
     assert_eq!(out.stdout, b"pidfd-plus-ladder\n");
     assert_eq!(out.stderr, b"");
-    common::assert_no_fallback_leftovers(&common::tmpdir());
+    common::assert_no_fallback_leftovers(&good);
 }
 
 #[test]

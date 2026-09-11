@@ -1,14 +1,14 @@
-//! `memfd-run`: exec a file straight from memory from your shell.
+//! Execute a file from memory with `memfd-run`.
 //!
-//! Reads the file's bytes, stages them in a memfd (falling back to the tmpfs
-//! ladder exactly like the library), and executes them in a child process.
+//! The command reads the file bytes and writes them to a memfd. It uses the
+//! library's temporary-file sequence when memfd is not available. It then
+//! executes the image in a child process.
 //!
 //! ```text
 //! memfd-run [--name NAME] [--argv0 ARGV0] [--] FILE [ARGS...]
 //! ```
 //!
-//! Compiled only under the `cli` feature to keep the library lean:
-//! `cargo build --features cli`.
+//! The `cli` feature builds this command. Use `cargo build --features cli`.
 
 use std::io::Write;
 use std::process::ExitCode;
@@ -73,7 +73,9 @@ fn main() -> ExitCode {
     }
     exe.args(&rest);
     // keep the child's stdio attached to the terminal unless the caller pipes
-    exe.stdin(Stdio::inherit()).stdout(Stdio::inherit()).stderr(Stdio::inherit());
+    exe.stdin(Stdio::inherit())
+        .stdout(Stdio::inherit())
+        .stderr(Stdio::inherit());
 
     match exe.status() {
         Ok(status) => {

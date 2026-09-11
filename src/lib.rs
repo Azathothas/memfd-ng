@@ -1,29 +1,17 @@
-//! Execute ELF binaries straight from memory.
+//! Execute ELF image bytes from memory on Linux and FreeBSD.
 //!
-//! Put the bytes of a Linux executable in a `&[u8]` — `include_bytes!()`,
-//! a socket, a compiler — and [`MemFdExecutable`] runs them straight from an
-//! anonymous in-memory file:
+//! Pass the image in a `&[u8]`. [`MemFdExecutable`] writes it to an anonymous
+//! file and executes it.
 //!
-//! - The image is written to a `memfd_create(2)` file and executed with
-//!   `execveat(2)` + `AT_EMPTY_PATH` (no procfs required), falling back to
-//!   `execve("/proc/self/fd/N")`, and finally to an allocation-free
-//!   tmpfs ladder for kernels or emulation layers without fd-based exec.
-//! - Prepared images are sealed (`F_SEAL_SHRINK | F_SEAL_GROW |
-//!   `F_SEAL_WRITE`) so nothing can swap the code between the write and the
-//!   exec, and repeated spawns reuse the sealed image without rewriting it
-//!   (see [`MemFdExecutable::prepare`]).
-//! - The memfd carries `MFD_CLOEXEC` and `MFD_EXEC` where the kernel
-//!   supports them, so the image fd is visible to the executing child and
-//!   to nothing else, and kernels configured to restrict memfd execution
-//!   keep enforcing that.
-//! - Failures surface as real `std::io::Error` values with the operating
-//!   system's own errno, from `spawn()`/`status()`/`output()` just like
-//!   `std::process`. The library never writes to stderr.
+//! Linux uses `execveat(2)` first. FreeBSD uses `fexecve(2)`. The library can
+//! use a temporary executable file if descriptor execution is not available.
+//! Prepared images use the configured file seals. Repeated calls can use the
+//! same prepared image. Execution failures return `std::io::Error` values.
+//! The library does not write diagnostic text to standard error.
 //!
 //! # Environment
 //!
-//! Set `NO_MEMFDEXEC=1` to skip the memfd path and go straight to the tmpfs
-//! ladder (useful under emulators whose execveat support is incomplete).
+//! Set `NO_MEMFDEXEC=1` to skip memfd execution and use a temporary file.
 //!
 //! # Example
 //!

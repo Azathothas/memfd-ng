@@ -1,6 +1,7 @@
-//! Environment handling for the child process, matching `std::process`:
-//! unmodified commands inherit the parent environment wholesale; any explicit
-//! mutation captures a full effective environment before fork.
+//! Manage the environment for the child process.
+//!
+//! An unchanged command inherits the parent environment. An explicit change
+//! creates the complete child environment before `fork`.
 
 use std::collections::BTreeMap;
 use std::env;
@@ -30,9 +31,9 @@ impl CommandEnv {
         self.clear
     }
 
-    /// The effective environment if the command was spawned right now, or
-    /// None when nothing was explicitly changed and the child should simply
-    /// inherit the parent's `environ`.
+    /// Return the child environment after an explicit change.
+    ///
+    /// Return `None` when the child must inherit the parent environment.
     pub fn capture_if_changed(&self) -> Option<BTreeMap<OsString, OsString>> {
         (self.get_does_clear() || !self.vars.is_empty()).then(|| self.capture())
     }

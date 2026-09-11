@@ -15,12 +15,21 @@ fn binary() -> &'static str {
 #[test]
 fn runs_a_static_stub_from_memory() {
     let out = Command::new(binary())
-        .args(["--", common::static_stub().to_str().unwrap(), "print", "via-cli"])
+        .args([
+            "--",
+            common::static_stub().to_str().unwrap(),
+            "print",
+            "via-cli",
+        ])
         .stdout(std::process::Stdio::piped())
         .stderr(std::process::Stdio::piped())
         .output()
         .unwrap();
-    assert!(out.status.success(), "stderr: {}", String::from_utf8_lossy(&out.stderr));
+    assert!(
+        out.status.success(),
+        "stderr: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
     assert_eq!(out.stdout, b"via-cli\n");
 }
 
@@ -32,12 +41,12 @@ fn propagates_exit_codes_and_signals() {
         .unwrap();
     assert_eq!(out.code(), Some(42));
 
-    // a child that dies by signal must surface as 128+signal (SIGSEGV=11 -> 139)
+    // A signal exit must return 128 plus the signal number.
     let out = Command::new(binary())
         .args(["--", common::static_stub().to_str().unwrap(), "crash"])
         .status()
         .unwrap();
-    assert_eq!(out.code(), Some(139), "signal death must surface as 128+sig");
+    assert_eq!(out.code(), Some(139), "signal exit must return 128+signal");
 }
 
 #[test]
@@ -45,7 +54,16 @@ fn argv0_and_name_flags_work() {
     // --argv0 must reach the program as $0; sh reads it
     let sh = "/bin/sh";
     let out = Command::new(binary())
-        .args(["--name", "sh-from-cli", "--argv0", "my-shell", "--", sh, "-c", "echo $0"])
+        .args([
+            "--name",
+            "sh-from-cli",
+            "--argv0",
+            "my-shell",
+            "--",
+            sh,
+            "-c",
+            "echo $0",
+        ])
         .stdout(std::process::Stdio::piped())
         .output()
         .unwrap();
@@ -78,5 +96,8 @@ fn corrupt_payload_surfaces_the_kernel_errno() {
     let _ = std::fs::remove_dir_all(&dir);
     assert_eq!(out.status.code(), Some(126), "exec failure must be 126");
     let msg = String::from_utf8_lossy(&out.stderr);
-    assert!(msg.contains("os error 8"), "message must carry the kernel verdict: {msg}");
+    assert!(
+        msg.contains("os error 8"),
+        "message must contain ENOEXEC: {msg}"
+    );
 }

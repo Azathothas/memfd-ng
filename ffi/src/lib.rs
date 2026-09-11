@@ -210,7 +210,7 @@ pub unsafe extern "C" fn memfd_ng_wait(child: *mut MemFdNgChild, status_out: *mu
 }
 
 /// Release the handle WITHOUT waiting: the child becomes a zombie until some
-/// process reaps it, exactly like dropping a `std::process::Child`.
+/// process waits for it, as `std::process::Child` does when required here.
 ///
 /// # Safety
 /// `child` must be a live handle, released exactly once.

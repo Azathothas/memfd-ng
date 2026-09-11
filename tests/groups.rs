@@ -1,4 +1,4 @@
-//! Process-group options: setsid() and process_group() builder knobs, with
+//! Test the `setsid()` and `process_group()` options with
 //! std::process::Command::process_group as the oracle where they overlap.
 //!
 //! Every probe spawns with stdout piped so the asserting test knows the
@@ -17,7 +17,11 @@ use std::process::Command as StdCommand;
 /// the same child process.
 fn probe(mut exe: MemFdExecutable) -> (i32, i32, i32) {
     exe.arg("pgroup");
-    let mut child = exe.stdout(Stdio::MakePipe).stderr(Stdio::MakePipe).spawn().unwrap();
+    let mut child = exe
+        .stdout(Stdio::MakePipe)
+        .stderr(Stdio::MakePipe)
+        .spawn()
+        .unwrap();
     let pid = child.id() as i32;
     let mut buf = String::new();
     child
@@ -58,10 +62,17 @@ fn setsid_gives_the_child_its_own_session() {
 
     // setsid: the child becomes session AND group leader, in a session of
     // its own — different from ours and from its siblings'
-    assert_eq!(pgid, pid, "setsid must make the child a session+group leader");
+    assert_eq!(
+        pgid, pid,
+        "setsid must make the child a session+group leader"
+    );
     assert_eq!(pgid2, pid2);
     assert_ne!(sid, sid2, "different children get different sessions");
-    assert_ne!(sid, unsafe { libc::getsid(0) }, "child must not share our session");
+    assert_ne!(
+        sid,
+        unsafe { libc::getsid(0) },
+        "child must not share our session"
+    );
 }
 
 #[test]
@@ -71,7 +82,11 @@ fn process_group_zero_makes_the_child_a_group_leader() {
     exe.process_group(0);
     let (pid, pgid, sid) = probe(exe);
     assert_eq!(pgid, pid, "pgid(0) must make the child lead its own group");
-    assert_eq!(sid, unsafe { libc::getsid(0) }, "process_group(0) must not change the session");
+    assert_eq!(
+        sid,
+        unsafe { libc::getsid(0) },
+        "process_group(0) must not change the session"
+    );
 }
 
 #[test]
@@ -144,7 +159,7 @@ fn process_groups_work_on_dynamic_payloads_too() {
 #[test]
 fn default_is_no_session_or_group_change() {
     let _guard = common::serial();
-    // without the knobs the child inherits the parent's session and group
+    // Without options, the child inherits the parent session and group.
     let exe = MemFdExecutable::new("pgroup-default", stub_code());
     let (_, pgid, sid) = probe(exe);
     assert_eq!(pgid, unsafe { libc::getpgid(0) });

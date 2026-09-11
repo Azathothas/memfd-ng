@@ -8,9 +8,9 @@
 //! Deterministic: xorshift64* seeded per case, so a failure reproduces with
 //! `MEMFD_NG_FUZZ_CASE=<n>` (a single case) or by re-running this file.
 
-#![cfg(feature = "test-hooks")]
+#![cfg(all(feature = "test-hooks", target_os = "linux"))]
 
-use memfd_ng::protocol::{pipe_read, pipe_write_errno, pipe_write_named_path, PipeMsg};
+use memfd_ng::protocol::{pipe_read, PipeMsg};
 use memfd_ng::{MemFdExecutable, Stdio};
 
 struct Xorshift(u64);
@@ -61,7 +61,11 @@ impl Pipe {
                 let mut off = 0;
                 while off < piece.len() {
                     let n = unsafe {
-                        libc::write(wfd, piece[off..].as_ptr() as *const libc::c_void, piece.len() - off)
+                        libc::write(
+                            wfd,
+                            piece[off..].as_ptr() as *const libc::c_void,
+                            piece.len() - off,
+                        )
                     };
                     if n <= 0 {
                         let errno = std::io::Error::last_os_error().raw_os_error().unwrap_or(0);
@@ -232,9 +236,14 @@ fn truncations_reject_or_degrade_never_misdecode() {
             Outcome::Msg(PipeMsg::Success) => assert_eq!(cut, 0, "empty input only"),
             Outcome::Msg(PipeMsg::Failure(code)) => {
                 // only a complete 8-byte frame can decode
-                assert_eq!(cut, 8, "truncated frame decoded as Failure({code}) at cut={cut}");
+                assert_eq!(
+                    cut, 8,
+                    "truncated frame decoded as Failure({code}) at cut={cut}"
+                );
             }
-            Outcome::Msg(PipeMsg::NamedPath(_)) => panic!("NOEX frame decoded as PATH at cut={cut}"),
+            Outcome::Msg(PipeMsg::NamedPath(_)) => {
+                panic!("NOEX frame decoded as PATH at cut={cut}")
+            }
             Outcome::InvalidData(_) => assert!(cut > 0 && cut < 8, "cut={cut}"),
         }
     }
@@ -248,7 +257,10 @@ fn truncations_reject_or_degrade_never_misdecode() {
             Outcome::Msg(PipeMsg::NamedPath(got)) => {
                 // a short image degrades to a shorter path, never a lie
                 // about the header: the reader takes what arrived
-                assert!(cut >= 6, "header-only cut decoded as NamedPath at cut={cut}");
+                assert!(
+                    cut >= 6,
+                    "header-only cut decoded as NamedPath at cut={cut}"
+                );
                 let claimed = u16::from_be_bytes([frame[0], frame[1]]) as usize;
                 let available = cut - 6;
                 let expect = image[..available.min(claimed)].to_vec();
@@ -300,7 +312,7 @@ fn junk_never_panics_and_never_hangs() {
 fn bitflipped_valid_frames_stay_legal() {
     let (from, to) = fuzz_seed();
     for seed in from..(from + (to - from).min(1000)) {
-        let mut rng = Xorshift(0x0DDB_1A5_0000_0000 ^ seed.wrapping_mul(0x9E37_79B9_7F4A_7C15));
+        let mut rng = Xorshift(0x00DD_B1A5_0000_0000 ^ seed.wrapping_mul(0x9E37_79B9_7F4A_7C15));
         let mut frame = if rng.below(2) == 0 {
             errno_frame(rng.next() as i32)
         } else {
@@ -350,7 +362,7 @@ fn empty_pipe_is_success_eof() {
 #[test]
 fn end_to_end_the_reader_agrees_with_the_real_child() {
     // The fuzzed protocol is live protocol: drive a real failed spawn and
-    // assert the errno survives the pipe into spawn()'s error.
+    // Check that spawn returns the error number received through the pipe.
     let err = MemFdExecutable::new("fuzz-live", b"\x7fELF-nope")
         .stdout(Stdio::MakePipe)
         .status()

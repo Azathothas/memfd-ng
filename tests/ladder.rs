@@ -1,121 +1,110 @@
-//! Exec-ladder tests that force the fallback rungs. These require the
-//! `test-hooks` feature:
+//! Test each descriptor and temporary-file execution method. These tests
+//! require the `test-hooks` feature.
 //!
 //! ```sh
 //! cargo test --features test-hooks
 //! ```
 //!
 //! Hooks:
-//! - `MEMFD_NG_TEST_NO_EXECVEAT` — the child skips `execveat(2)` (old kernel)
-//! - `MEMFD_NG_TEST_NO_PROC`     — the process pretends procfs is absent
-//!   (skips the `/proc/self/fd` rung, keeps tmpfs names, uses the named rung)
+//! - `MEMFD_NG_TEST_NO_EXECVEAT` disables `execveat(2)`.
+//! - `MEMFD_NG_TEST_NO_PROC` disables the `/proc/self/fd` method.
+//! - `MEMFD_NG_TEST_NO_OTMPFILE` disables `O_TMPFILE`.
+//! - `MEMFD_NG_TEST_NO_NAMED_STAGE` disables named-file creation.
+//!
+//! Each test sets `TMPDIR` to a new executable directory. The test checks this
+//! directory for files that remain.
 
-#![cfg(feature = "test-hooks")]
+#![cfg(all(feature = "test-hooks", target_os = "linux"))]
 
 mod common;
 
 #[cfg(target_arch = "x86_64")]
 use common::TINY_ELF_EXIT42;
-use common::stub_code;
+use common::{stub_code, EnvGuard};
 use memfd_ng::{MemFdExecutable, Stdio};
 
 #[test]
 fn rung2_proc_path_executes_when_execveat_is_refused() {
-    let guard = common::serial();
-    std::env::set_var("MEMFD_NG_TEST_NO_EXECVEAT", "1");
+    let _g = EnvGuard::set(&[("MEMFD_NG_TEST_NO_EXECVEAT", "1")]);
     let out = MemFdExecutable::new("rung2-stub", stub_code())
         .args(["print", "via-procfd-rung"])
         .stdout(Stdio::MakePipe)
         .output()
         .unwrap();
-    std::env::remove_var("MEMFD_NG_TEST_NO_EXECVEAT");
-    drop(guard);
     assert_eq!(out.stdout, b"via-procfd-rung\n");
     assert!(out.status.success());
 }
 
 #[test]
 fn named_rung_executes_and_parent_cleans_up_without_procfs() {
-    // With procfs "absent": no execveat, no /proc/self/fd rung, the tmpfs
-    // image keeps its name, and the named rung must exec it. The parent
-    // owns the name from the moment the child reports it and unlinks after
-    // reaping — assert nothing is left behind.
-    let guard = common::serial();
-    common::clear_stale_fallback_files(&common::tmpdir());
-    std::env::set_var("MEMFD_NG_TEST_NO_EXECVEAT", "1");
-    std::env::set_var("MEMFD_NG_TEST_NO_PROC", "1");
-
+    // Disable execveat and procfs. The child then uses a named file. The parent
+    // removes the file after it waits for the child.
+    let good = common::exec_tmpdir("named-rung");
+    let _g = EnvGuard::set(&[
+        ("MEMFD_NG_TEST_NO_EXECVEAT", "1"),
+        ("MEMFD_NG_TEST_NO_PROC", "1"),
+        ("TMPDIR", good.to_str().unwrap()),
+    ]);
     let out = MemFdExecutable::new("named-rung-stub", stub_code())
         .args(["print", "via-named-rung"])
         .stdout(Stdio::MakePipe)
         .output()
         .unwrap();
-
-    std::env::remove_var("MEMFD_NG_TEST_NO_PROC");
-    std::env::remove_var("MEMFD_NG_TEST_NO_EXECVEAT");
-    drop(guard);
-
     assert_eq!(out.stdout, b"via-named-rung\n");
     assert!(out.status.success());
-    common::assert_no_fallback_leftovers(&common::tmpdir());
+    common::assert_no_fallback_leftovers(&good);
 }
 
 #[test]
 fn named_rung_failure_cleans_up_via_pipe_protocol() {
-    // Same no-procfs corner, but the image cannot exec at all: the child
-    // reports the errno through the CLOEXEC pipe and the parent must unlink
-    // the still-named file it inherited ownership of.
-    let guard = common::serial();
-    common::clear_stale_fallback_files(&common::tmpdir());
-    std::env::set_var("MEMFD_NG_TEST_NO_PROC", "1");
-
+    // Disable procfs and execute an invalid image. The child reports the error
+    // through the pipe. The parent removes the named file.
+    let good = common::exec_tmpdir("named-fail");
+    let _g = EnvGuard::set(&[
+        ("MEMFD_NG_TEST_NO_PROC", "1"),
+        ("TMPDIR", good.to_str().unwrap()),
+    ]);
     let err = MemFdExecutable::new("doomed", b"definitely not an elf")
         .status()
         .unwrap_err();
-
-    std::env::remove_var("MEMFD_NG_TEST_NO_PROC");
-    drop(guard);
-
-    // the verdict must still be the kernel's own (ENOEXEC), not a panic
+    // The result must be ENOEXEC.
     assert_eq!(err.raw_os_error(), Some(8));
-    common::assert_no_fallback_leftovers(&common::tmpdir());
+    common::assert_no_fallback_leftovers(&good);
 }
 
 #[test]
 #[cfg(target_arch = "x86_64")]
 fn tiny_elf_still_runs_through_every_rung() {
-    // smoke the deterministic image through the forced rungs one at a time
+    // Execute the deterministic image with each method.
     let cases: &[(&str, Option<&str>)] = &[
         ("execveat", None),
         ("procfd", Some("MEMFD_NG_TEST_NO_EXECVEAT")),
         ("named", Some("MEMFD_NG_TEST_NO_PROC")),
     ];
     for (label, hook) in cases {
-        let guard = common::serial();
-        let unset = hook.map(|h| {
-            std::env::set_var(h, "1");
-            h
-        });
-        let st = MemFdExecutable::new("tiny", TINY_ELF_EXIT42).status().unwrap();
-        if let Some(h) = unset {
-            std::env::remove_var(h);
+        let good = common::exec_tmpdir("tiny");
+        let mut g = EnvGuard::set(&[("TMPDIR", good.to_str().unwrap())]);
+        if let Some(h) = hook {
+            g.put(h, "1");
         }
-        drop(guard);
-        assert_eq!(st.code(), Some(42), "tiny elf failed on the {label} rung");
+        let st = MemFdExecutable::new("tiny", TINY_ELF_EXIT42)
+            .status()
+            .unwrap();
+        assert_eq!(st.code(), Some(42), "the ELF failed with {label}");
     }
 }
 
 #[test]
 fn otmpfile_staging_serves_the_whole_ladder() {
-    // Default staging now tries O_TMPFILE first. With named staging forbidden
-    // by hook, every ladder configuration must still work — a success here
-    // proves the O_TMPFILE path (write phase fully anonymous) carried it.
-    let guard = common::serial();
-    common::clear_stale_fallback_files(&common::tmpdir());
-    std::env::set_var("MEMFD_NG_TEST_NO_NAMED_STAGE", "1");
+    // Require O_TMPFILE by disabling named-file creation. Each applicable
+    // execution configuration must still work.
+    let good = common::exec_tmpdir("otmp");
+    let mut g = EnvGuard::set(&[
+        ("MEMFD_NG_TEST_NO_NAMED_STAGE", "1"),
+        ("TMPDIR", good.to_str().unwrap()),
+    ]);
 
-    // 1. ordinary rungs (memfd available): tmpfs staging is not even reached,
-    //    but the suite proves the hook does not break normal operation
+    // Case 1 uses memfd execution. The test hook must not affect this case.
     let out = MemFdExecutable::new("otmp-memfd", stub_code())
         .args(["print", "otmp-normal"])
         .stdout(Stdio::MakePipe)
@@ -123,8 +112,8 @@ fn otmpfile_staging_serves_the_whole_ladder() {
         .unwrap();
     assert_eq!(out.stdout, b"otmp-normal\n");
 
-    // 2. fallback ladder with procfs: O_TMPFILE + /proc/self/fd reopen
-    std::env::set_var("NO_MEMFDEXEC", "1");
+    // Case 2 uses O_TMPFILE and reopens the file through /proc/self/fd.
+    g.put("NO_MEMFDEXEC", "1");
     let out = MemFdExecutable::new("otmp-proc", stub_code())
         .args(["print", "otmp-via-proc-reopen"])
         .stdout(Stdio::MakePipe)
@@ -132,14 +121,13 @@ fn otmpfile_staging_serves_the_whole_ladder() {
         .output()
         .unwrap();
     assert_eq!(out.stdout, b"otmp-via-proc-reopen\n");
-    assert_eq!(out.stderr, b"", "library must stay silent");
-    std::env::remove_var("NO_MEMFDEXEC");
+    assert_eq!(out.stderr, b"", "the crate must stay silent");
+    g.unset("NO_MEMFDEXEC");
 
-    // 3. fallback ladder without procfs: O_TMPFILE + linkat dance (needs
-    //    CAP_DAC_READ_SEARCH; as non-root this test degrades to EPERM-
-    //    enforced failure, which is exactly what the hook asked for)
-    std::env::set_var("MEMFD_NG_TEST_NO_EXECVEAT", "1");
-    std::env::set_var("MEMFD_NG_TEST_NO_PROC", "1");
+    // Case 3 uses O_TMPFILE and linkat without procfs. This operation requires
+    // CAP_DAC_READ_SEARCH. EPERM is valid for an unprivileged user.
+    g.put("MEMFD_NG_TEST_NO_EXECVEAT", "1");
+    g.put("MEMFD_NG_TEST_NO_PROC", "1");
     let out = MemFdExecutable::new("otmp-norproc", stub_code())
         .args(["print", "otmp-via-linkat-dance"])
         .stdout(Stdio::MakePipe)
@@ -149,55 +137,74 @@ fn otmpfile_staging_serves_the_whole_ladder() {
         Ok(o) => assert_eq!(o.stdout, b"otmp-via-linkat-dance\n"),
         Err(e) => assert_eq!(e.raw_os_error(), Some(1) /* EPERM: hook-enforced */),
     }
-
-    for h in [
-        "MEMFD_NG_TEST_NO_NAMED_STAGE",
-        "MEMFD_NG_TEST_NO_EXECVEAT",
-        "MEMFD_NG_TEST_NO_PROC",
-    ] {
-        std::env::remove_var(h);
-    }
-    common::assert_no_fallback_leftovers(&common::tmpdir());
-    drop(guard);
+    common::assert_no_fallback_leftovers(&good);
 }
 
 #[test]
 fn legacy_named_staging_still_works_when_otmpfile_is_off() {
-    // A/B control: with O_TMPFILE skipped by hook, the classic named flow
-    // must behave exactly as before (write -> chmod -> exec, parent cleanup).
-    let guard = common::serial();
-    common::clear_stale_fallback_files(&common::tmpdir());
-    std::env::set_var("MEMFD_NG_TEST_NO_OTMPFILE", "1");
-    std::env::set_var("MEMFD_NG_TEST_NO_EXECVEAT", "1");
-    std::env::set_var("MEMFD_NG_TEST_NO_PROC", "1");
-
+    // Disable O_TMPFILE. The named-file method must write, set the mode,
+    // execute, and remove the file.
+    let good = common::exec_tmpdir("legacy-named");
+    let _g = EnvGuard::set(&[
+        ("MEMFD_NG_TEST_NO_OTMPFILE", "1"),
+        ("MEMFD_NG_TEST_NO_EXECVEAT", "1"),
+        ("MEMFD_NG_TEST_NO_PROC", "1"),
+        ("TMPDIR", good.to_str().unwrap()),
+    ]);
     let out = MemFdExecutable::new("legacy-named", stub_code())
         .args(["print", "legacy-named-staging"])
         .stdout(Stdio::MakePipe)
         .output()
         .unwrap();
-
-    for h in [
-        "MEMFD_NG_TEST_NO_OTMPFILE",
-        "MEMFD_NG_TEST_NO_EXECVEAT",
-        "MEMFD_NG_TEST_NO_PROC",
-    ] {
-        std::env::remove_var(h);
-    }
-    drop(guard);
     assert_eq!(out.stdout, b"legacy-named-staging\n");
-    common::assert_no_fallback_leftovers(&common::tmpdir());
+    common::assert_no_fallback_leftovers(&good);
+}
+
+#[test]
+fn home_cache_rung_stages_inside_dot_cache() {
+    // Skip the fixed system directories. Set the first two environment paths
+    // to directories that do not exist. The fallback must use $HOME/.cache.
+    let home = common::exec_tmpdir("home-cache");
+    let _g = EnvGuard::set(&[
+        ("NO_MEMFDEXEC", "1"),
+        ("MEMFD_NG_TEST_NO_SYSDIRS", "1"),
+        ("XDG_RUNTIME_DIR", "/nonexistent-mfd-h1"),
+        ("TMPDIR", "/nonexistent-mfd-h2"),
+        ("HOME", home.to_str().unwrap()),
+    ]);
+    let out = MemFdExecutable::new("home-cache", stub_code())
+        .args(["print", "staged-in-cache"])
+        .stdout(Stdio::MakePipe)
+        .stderr(Stdio::MakePipe)
+        .output()
+        .unwrap();
+    assert_eq!(out.stdout, b"staged-in-cache\n");
+    assert_eq!(out.stderr, b"");
+    let cache = home.join(".cache");
+    assert!(cache.is_dir(), "the HOME fallback must create $HOME/.cache");
+    common::assert_no_fallback_leftovers(&cache);
+    let stray: Vec<_> = std::fs::read_dir(&home)
+        .unwrap()
+        .filter_map(|e| e.ok())
+        .filter(|e| {
+            e.file_name()
+                .to_string_lossy()
+                .starts_with(common::FALLBACK_PREFIX)
+        })
+        .collect();
+    assert!(stray.is_empty(), "must not stage in HOME root: {stray:?}");
 }
 
 #[test]
 fn otmpfile_off_procmode_still_cleans_up_failures() {
-    // A/B control with procfs: O_TMPFILE skipped, the named-create-then-
-    // unlink flow must still leave nothing behind on success and failure.
-    let guard = common::serial();
-    common::clear_stale_fallback_files(&common::tmpdir());
-    std::env::set_var("MEMFD_NG_TEST_NO_OTMPFILE", "1");
-    std::env::set_var("NO_MEMFDEXEC", "1");
-
+    // A/B control with procfs: O_TMPFILE skipped, the named-create-then-unlink
+    // flow must leave nothing behind on success and failure.
+    let good = common::exec_tmpdir("legacy-proc");
+    let _g = EnvGuard::set(&[
+        ("MEMFD_NG_TEST_NO_OTMPFILE", "1"),
+        ("NO_MEMFDEXEC", "1"),
+        ("TMPDIR", good.to_str().unwrap()),
+    ]);
     let out = MemFdExecutable::new("legacy-proc", stub_code())
         .args(["print", "legacy-with-procfs"])
         .stdout(Stdio::MakePipe)
@@ -209,9 +216,5 @@ fn otmpfile_off_procmode_still_cleans_up_failures() {
         .status()
         .unwrap_err();
     assert_eq!(err.raw_os_error(), Some(8) /* ENOEXEC */);
-
-    std::env::remove_var("NO_MEMFDEXEC");
-    std::env::remove_var("MEMFD_NG_TEST_NO_OTMPFILE");
-    drop(guard);
-    common::assert_no_fallback_leftovers(&common::tmpdir());
+    common::assert_no_fallback_leftovers(&good);
 }

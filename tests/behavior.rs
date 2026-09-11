@@ -1,15 +1,16 @@
-//! Behavior tests: memfd mechanics, sealing, the tmpfs ladder, the CLOEXEC
-//! pipe protocol, and cleanup guarantees. Everything here has a hard
-//! assertion, not just a "it didn't crash" shape.
+//! Test memfd behavior, sealing, temporary files, descriptors, pipes, and
+//! cleanup. Each test executes a real ELF image and checks the result.
+
+#![cfg(target_os = "linux")]
 
 mod common;
 
 use std::thread::sleep;
 use std::time::{Duration, Instant};
 
+use common::stub_code;
 #[cfg(target_arch = "x86_64")]
 use common::TINY_ELF_EXIT42;
-use common::stub_code;
 use std::os::unix::io::AsRawFd;
 
 use memfd_ng::{MemFdExecutable, Stdio};
@@ -18,11 +19,14 @@ use memfd_ng::{MemFdExecutable, Stdio};
 fn memfd_name_visible_in_child() {
     let _guard = common::serial();
     // the image name must reach /proc/<pid>/exe as /memfd:<name>
-    let out = MemFdExecutable::new("ng-name-probe", &std::fs::read("/usr/bin/readlink").unwrap())
-        .arg("/proc/self/exe")
-        .stdout(Stdio::MakePipe)
-        .output()
-        .unwrap();
+    let out = MemFdExecutable::new(
+        "ng-name-probe",
+        &std::fs::read("/usr/bin/readlink").unwrap(),
+    )
+    .arg("/proc/self/exe")
+    .stdout(Stdio::MakePipe)
+    .output()
+    .unwrap();
     let exe = String::from_utf8_lossy(&out.stdout).trim().to_string();
     assert!(
         exe.starts_with("/memfd:ng-name-probe"),
@@ -47,16 +51,18 @@ fn image_fd_not_leaked_into_children() {
 #[cfg(target_arch = "x86_64")]
 fn tiny_elf_without_libc_exits_42() {
     let _guard = common::serial();
-    let st = MemFdExecutable::new("tiny", TINY_ELF_EXIT42).status().unwrap();
+    let st = MemFdExecutable::new("tiny", TINY_ELF_EXIT42)
+        .status()
+        .unwrap();
     assert_eq!(st.code(), Some(42));
 }
 
 #[test]
 fn large_payload_survives_the_write_loop() {
     let _guard = common::serial();
-    // a real binary padded to ~9 MiB with trailing garbage (loaders ignore
-    // bytes past the last PT_LOAD): exercises partial-write looping far
-    // beyond one page.
+    // Add bytes after the real binary to produce an image of about 9 MiB.
+    // Loaders ignore bytes after the last PT_LOAD segment. This size requires
+    // the write loop to process more than one page.
     let mut code = stub_code().to_vec();
     code.resize(9 * 1024 * 1024, b'\0');
     let out = MemFdExecutable::new("big-stub", &code)
@@ -78,11 +84,14 @@ fn sealing_is_applied_and_visible() {
     // longer exists on 6.18+; F_GET_SEALS is the interface that remains.)
     let path = exe.memfd_path().expect("procfs available in tests");
     let probe = std::fs::File::open(&path).unwrap();
-    let bits = unsafe { libc::fcntl(probe.as_raw_fd(), 1034 /* F_GET_SEALS */) };
+    let bits = unsafe {
+        libc::fcntl(probe.as_raw_fd(), 1034 /* F_GET_SEALS */)
+    };
     assert!(bits >= 0, "F_GET_SEALS failed");
     let bits = bits as u32;
-    const SEAL_SHRINK: u32 = 0x1;
-    const SEAL_GROW: u32 = 0x2;
+    // Kernel F_SEAL_* values (F_SEAL_SEAL is 0x1).
+    const SEAL_SHRINK: u32 = 0x2;
+    const SEAL_GROW: u32 = 0x4;
     const SEAL_WRITE: u32 = 0x8;
     assert_eq!(
         bits & (SEAL_SHRINK | SEAL_GROW | SEAL_WRITE),
@@ -126,14 +135,16 @@ fn prepared_spawn_reuses_the_image() {
         assert_eq!(st.code(), Some(0), "iteration {i}");
     }
     let path_after = exe.memfd_path().unwrap();
-    assert_eq!(path_before, path_after, "spawn should not rewrite the image");
+    assert_eq!(
+        path_before, path_after,
+        "spawn should not rewrite the image"
+    );
 }
 
 #[test]
 fn tmpfs_ladder_leaves_no_files() {
-    let guard = common::serial();
-    let _guard = &guard;
-    std::env::set_var("NO_MEMFDEXEC", "1");
+    let good = common::exec_tmpdir("leaves-no-files");
+    let _g = common::EnvGuard::set(&[("NO_MEMFDEXEC", "1"), ("TMPDIR", good.to_str().unwrap())]);
     let out = MemFdExecutable::new("fb-stub", stub_code())
         .arg("print")
         .arg("from-tmpfs")
@@ -141,13 +152,11 @@ fn tmpfs_ladder_leaves_no_files() {
         .stderr(Stdio::MakePipe)
         .output()
         .unwrap();
-    std::env::remove_var("NO_MEMFDEXEC");
-    drop(guard);
 
     assert_eq!(out.stdout, b"from-tmpfs\n");
-    // the library must stay silent on the fallback path too
-    assert_eq!(out.stderr, b"", "library must never write to stderr");
-    common::assert_no_fallback_leftovers(&common::tmpdir());
+    // the crate must stay silent on the fallback path too
+    assert_eq!(out.stderr, b"", "the crate must never write to stderr");
+    common::assert_no_fallback_leftovers(&good);
 }
 
 #[test]
@@ -191,7 +200,10 @@ fn try_wait_and_reap_cleanup() {
         .arg("sleep")
         .spawn()
         .unwrap();
-    assert!(child.try_wait().unwrap().is_none(), "child finished too fast");
+    assert!(
+        child.try_wait().unwrap().is_none(),
+        "child finished too fast"
+    );
     child.kill().unwrap();
     let deadline = Instant::now() + Duration::from_secs(5);
     loop {
@@ -274,17 +286,15 @@ fn static_stub_is_really_static() {
 
 #[test]
 fn unmodified_env_inherits_the_parent_environment() {
-    let _guard = common::serial();
-    // std parity: a command with NO env modifications inherits the parent's
-    // whole environment. Regression: this crate used to hand the exec an
-    // empty environment instead (found in REVIEW-7).
-    std::env::set_var("MEMFD_NG_CANARY", "inherited-whole");
+    // std parity: a command with no environment change inherits the parent
+    // environment in full. A regression guard: the child must not receive an
+    // empty environment.
+    let _g = common::EnvGuard::set(&[("MEMFD_NG_CANARY", "inherited-whole")]);
     let out = MemFdExecutable::new("stub", stub_code())
         .args(["env", "MEMFD_NG_CANARY"])
         .stdout(Stdio::MakePipe)
         .output()
         .unwrap();
-    std::env::remove_var("MEMFD_NG_CANARY");
     assert_eq!(out.stdout, b"inherited-whole\n");
 }
 
@@ -323,12 +333,19 @@ fn prepare_then_spawn_stress() {
         let tag = format!("iter-{i}");
         let out = exe.arg(&tag).stdout(Stdio::MakePipe).output().unwrap();
         let line = String::from_utf8_lossy(&out.stdout);
-        assert!(line.starts_with("iter-0"), "accumulated argv lost early args at {i}");
+        assert!(
+            line.starts_with("iter-0"),
+            "accumulated argv lost early args at {i}"
+        );
         assert!(line.contains(&tag), "latest arg missing at iteration {i}");
         assert!(out.status.success(), "iteration {i}");
         assert_eq!(out.stderr, b"");
     }
-    assert_eq!(path_before, exe.memfd_path().unwrap(), "image must not be rewritten");
+    assert_eq!(
+        path_before,
+        exe.memfd_path().unwrap(),
+        "image must not be rewritten"
+    );
 }
 
 #[test]

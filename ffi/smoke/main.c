@@ -1,5 +1,5 @@
-/* Smoke test: link the memfd-ng cdylib from real C and drive the ABI.
- * Built and run by scripts/ffi-smoke.sh; exits 0 on success. */
+/* Link the memfd-ng shared library from C and test the ABI.
+ * scripts/ffi-smoke.sh builds and runs this program. */
 #include <stdio.h>
 #include <string.h>
 #include <sys/wait.h>
@@ -9,12 +9,12 @@
 
 int main(void) {
     if (memfd_ng_abi_version() != 1) {
-        fprintf(stderr, "smoke: unexpected ABI version\n");
+        fprintf(stderr, "test: unexpected ABI version\n");
         return 1;
     }
-    printf("smoke: linked against memfd-ng %s\n", memfd_ng_version());
+    printf("test: linked against memfd-ng %s\n", memfd_ng_version());
 
-    /* image: read a tiny shell script... no — read /bin/sh itself */
+    /* Read the shell executable as the test image. */
     FILE *f = fopen("/bin/sh", "rb");
     if (!f) { perror("fopen /bin/sh"); return 1; }
     fseek(f, 0, SEEK_END);
@@ -22,7 +22,7 @@ int main(void) {
     fseek(f, 0, SEEK_SET);
     static unsigned char code[8 << 20];
     if (len < 0 || (size_t)len > sizeof code || fread(code, 1, (size_t)len, f) != (size_t)len) {
-        fprintf(stderr, "smoke: read failed\n");
+        fprintf(stderr, "test: read failed\n");
         return 1;
     }
     fclose(f);
@@ -31,32 +31,32 @@ int main(void) {
     int32_t err = 0;
     memfd_ng_child *child = memfd_ng_spawn(code, (size_t)len, "smoke-sh", argv, NULL, &err);
     if (!child) {
-        fprintf(stderr, "smoke: spawn failed: %s (%d)\n", strerror(-err), -err);
+        fprintf(stderr, "test: spawn failed: %s (%d)\n", strerror(-err), -err);
         return 1;
     }
-    printf("smoke: child pid %d\n", memfd_ng_pid(child));
+    printf("test: child pid %d\n", memfd_ng_pid(child));
 
     int32_t status = 0;
     int rc = memfd_ng_wait(child, &status);
     if (rc != 0) {
-        fprintf(stderr, "smoke: wait failed: %s\n", strerror(-rc));
+        fprintf(stderr, "test: wait failed: %s\n", strerror(-rc));
         return 1;
     }
     if (!WIFEXITED(status) || WEXITSTATUS(status) != 5) {
-        fprintf(stderr, "smoke: unexpected wait status %d\n", status);
+        fprintf(stderr, "test: unexpected wait status %d\n", status);
         return 1;
     }
-    printf("smoke: child exited 5 as instructed\n");
+    printf("test: child exited with code 5\n");
 
-    /* error path: corrupt image must surface -ENOEXEC through err_out */
+    /* An invalid image must return -ENOEXEC through err_out. */
     const unsigned char bogus[] = {0x7f, 'E', 'L', 'F', 'n', 'o', 'p', 'e'};
     memfd_ng_child *bad = memfd_ng_spawn(bogus, sizeof bogus, "smoke-bogus", argv, NULL, &err);
     if (bad != NULL || err != -ENOEXEC) {
-        fprintf(stderr, "smoke: expected NULL/-ENOEXEC, got %p/%d\n", (void *)bad, err);
+        fprintf(stderr, "test: expected NULL/-ENOEXEC, got %p/%d\n", (void *)bad, err);
         return 1;
     }
-    printf("smoke: corrupt image surfaced ENOEXEC\n");
+    printf("test: invalid image returned ENOEXEC\n");
 
-    printf("smoke: all ok\n");
+    printf("test: all checks passed\n");
     return 0;
 }

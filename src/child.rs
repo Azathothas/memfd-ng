@@ -98,7 +98,11 @@ impl Child {
 
         let status = self.handle.wait()?;
         self.cleanup_fallback();
-        Ok(Output { status, stdout, stderr })
+        Ok(Output {
+            status,
+            stdout,
+            stderr,
+        })
     }
 
     fn cleanup_fallback(&mut self) {

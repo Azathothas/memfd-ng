@@ -75,9 +75,11 @@ impl Stdio {
                 let mut opts = OpenOptions::new();
                 opts.read(readable);
                 opts.write(!readable);
-                let path = Path::new(unsafe { CStr::from_bytes_with_nul_unchecked(b"/dev/null\0") }
-                    .to_str()
-                    .unwrap());
+                let path = Path::new(
+                    unsafe { CStr::from_bytes_with_nul_unchecked(b"/dev/null\0") }
+                        .to_str()
+                        .unwrap(),
+                );
                 // into_raw_fd, not as_raw_fd: ownership moves into the
                 // ChildStdio and the handle must not be closed when the
                 // temporary File would drop.

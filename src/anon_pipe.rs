@@ -119,7 +119,7 @@ pub fn read2(p1: AnonPipe, v1: &mut Vec<u8>, p2: AnonPipe, v2: &mut Vec<u8>) -> 
                 }
                 Ok(n) => buf.extend_from_slice(&chunk[..n]),
                 Err(ref e) if e.kind() == std::io::ErrorKind::WouldBlock => {}
-                // POLLERR|POLLHUP with no readable data surfaces as EAGAIN
+                // POLLERR or POLLHUP without readable data returns EAGAIN.
                 // on Linux once the buffer drains; anything else is real.
                 Err(e) if err => {
                     let _ = e;

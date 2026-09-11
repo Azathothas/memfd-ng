@@ -1,11 +1,9 @@
-//! `MFD_HUGETLB` option: the image may be staged on hugetlbfs, and every
-//! hugetlb refusal must degrade to an ordinary memfd — a spawn never fails
-//! *because of* hugetlb. Engagement is verified via fstatfs magic on the
-//! prepared memfd, never assumed from the builder flag.
-//! (x86_64-gated: the aligned-image test hardcodes the 2 MiB huge size;
-//! the degrade contract also runs on every other target via the other tests.)
+//! Test the Linux `MFD_HUGETLB` option. The option must not prevent execution
+//! when huge pages are unavailable. The test reads the file-system type from
+//! the prepared descriptor when the option succeeds.
 
 #![cfg(target_arch = "x86_64")]
+#![cfg(target_os = "linux")]
 
 mod common;
 
@@ -45,10 +43,8 @@ fn is_on_hugetlbfs(exe: &MemFdExecutable) -> Option<bool> {
 #[test]
 fn hugetlb_request_never_breaks_spawning() {
     let _guard = common::serial();
-    // Unaligned normal-size image: this host has huge pages configured but
-    // none preallocated, so the write into hugetlbfs fails (ENOMEM) and the
-    // contract says: degrade and run anyway. On hosts with free huge pages
-    // the image engages hugetlbfs instead — both outcomes must run.
+    // Use an image that does not have huge-page alignment. The library must
+    // use a normal memfd when the hugetlb write fails.
     let mut exe = MemFdExecutable::new("hugetlb-degrade", stub_code());
     exe.hugetlb(true);
     exe.prepare().unwrap();
@@ -65,10 +61,8 @@ fn hugetlb_request_never_breaks_spawning() {
 #[test]
 fn hugetlb_engaged_payload_is_verifiably_on_hugetlbfs() {
     let _guard = common::serial();
-    // Huge-page-aligned image: the engagement path becomes possible. When
-    // engaged, fstatfs must show the hugetlbfs magic (proof, not promise);
-    // when degraded (no free huge pages), the ordinary path must run the
-    // image.
+    // Use a huge-page-aligned image. An active request must use hugetlbfs. A
+    // normal memfd is valid when the host has no available huge pages.
     let mut code = TINY_ELF_EXIT42.to_vec();
     code.resize(2 * 1024 * 1024, 0); // x86_64 default huge page size
 
@@ -77,16 +71,23 @@ fn hugetlb_engaged_payload_is_verifiably_on_hugetlbfs() {
     exe.prepare().unwrap();
     match is_on_hugetlbfs(&exe) {
         Some(true) => {
-            assert!(exe.is_hugetlb(), "fstatfs says hugetlbfs, bookkeeping disagrees");
+            assert!(
+                exe.is_hugetlb(),
+                "fstatfs says hugetlbfs, bookkeeping disagrees"
+            );
+            assert!(
+                exe.is_sealed(),
+                "a hugetlb memfd must use the default seals"
+            );
+            assert_eq!(exe.current_seals(), Some(memfd_ng::SealFlags::full()));
         }
         Some(false) => {
             assert!(!exe.is_hugetlb());
         }
         None => {}
     }
-    // The kernel may still refuse to exec a hugetlbfs image whose segments
-    // it cannot map on this host; that must surface as a kernel errno, not
-    // a panic, a hang, or silent corruption.
+    // The kernel can reject an image that it cannot map. This failure must
+    // return an operating system error.
     let st = exe.status();
     match st {
         Ok(s) => assert_eq!(s.code(), Some(42), "padded tiny elf must still exit 42"),
@@ -95,7 +96,10 @@ fn hugetlb_engaged_payload_is_verifiably_on_hugetlbfs() {
                 e.raw_os_error().is_some(),
                 "hugetlb exec failure must carry a kernel errno, got {e:?}"
             );
-            assert!(exe.is_hugetlb(), "exec refused only makes sense when engaged");
+            assert!(
+                exe.is_hugetlb(),
+                "exec refused only makes sense when engaged"
+            );
         }
     }
 }
@@ -109,10 +113,16 @@ fn hugetlb_toggle_invalidates_the_prepared_image() {
     assert!(exe.is_prepared());
 
     exe.hugetlb(false);
-    assert!(!exe.is_prepared(), "hugetlb(false) must invalidate the cache");
+    assert!(
+        !exe.is_prepared(),
+        "hugetlb(false) must invalidate the cache"
+    );
     assert!(!exe.is_hugetlb());
     exe.prepare().unwrap();
-    assert!(!exe.is_hugetlb(), "second prepare must be an ordinary memfd");
+    assert!(
+        !exe.is_hugetlb(),
+        "second prepare must be an ordinary memfd"
+    );
     let st = exe.arg("exit").arg("3").status().unwrap();
     assert_eq!(st.code(), Some(3));
 }

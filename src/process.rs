@@ -40,8 +40,8 @@ impl Process {
     }
 
     pub fn kill(&mut self) -> Result<()> {
-        // Once reaped the pid can be recycled; refuse to kill whoever wears
-        // it next.
+        // A process ID can be reused after wait completes. Do not send a
+        // signal after this handle records the final status.
         if self.status.is_some() {
             return Err(Error::new(
                 ErrorKind::InvalidInput,

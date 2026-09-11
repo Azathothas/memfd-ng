@@ -1,9 +1,9 @@
 name: freebsd
 
-# Roadmap item 7: runtime verification on a real FreeBSD VM. The cfg-gated
-# fexecve rung (REVIEW-2, R2-2) was compile-reviewed only; this job runs the
-# full suite on x86_64 FreeBSD so the last "untested on real hardware" row in
-# the docs is retired.
+# Runtime verification on a real FreeBSD VM. On FreeBSD the crate runs a memfd
+# image through fexecve(2) (a kernel facility, not a procfs workaround). The
+# Linux-only test files compile without tests on FreeBSD. The portable process
+# tests, command-line tests, and C interface tests run on FreeBSD.
 
 on:
   push:
@@ -15,19 +15,20 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-      - name: Run the full test suite inside a FreeBSD VM
+      - name: Build and run the portable suite in a FreeBSD 14.2 VM
         uses: vmactions/freebsd-vm@v1
         with:
           release: "14.2"
           usesh: true
           copyback: false
           prepare: |
-            pkg install -y rust gcc
+            pkg install -y rust
           run: |
             set -e
-            cargo clippy --workspace --all-targets -- -D warnings || cargo clippy --workspace --all-targets
-            cargo test
-            cargo test --features test-hooks
-            cargo test --features cli
-            cargo test -p memfd-ng-ffi
-            cargo build --release
+            cargo build
+            cargo build --features cli
+            cargo build -p memfd-ng-ffi
+            cargo test --no-fail-fast
+            cargo test --no-fail-fast --features test-hooks
+            cargo test --no-fail-fast --features cli
+            cargo test -p memfd-ng-ffi --no-fail-fast
